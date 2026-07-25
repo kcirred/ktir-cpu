@@ -706,7 +706,7 @@ def _parse_tile_future_type(type_str, *, context):
     ``"ktdp.inter_tile_reduce operand 0"``); it is folded into the
     ``ValueError`` on a malformed type so diagnostics identify the site.
     """
-    from ..parser_utils import split_top_level
+    from ..parser_utils import extract_named_attr, split_top_level
     m = re.match(r"!ktdp\.tile_future<(.+)>", type_str or "")
     if not m:
         raise ValueError(
@@ -714,19 +714,17 @@ def _parse_tile_future_type(type_str, *, context):
         )
     inner = m.group(1).strip()
 
-    # Peel off the optional ``groups = <affine-set>`` clause first. Doing
-    # this before split_top_level() avoids splitting through commas inside
-    # the affine set — split_top_level counts (), [] but not <>. The regex
-    # consumes any leading `,\s*` separator itself, so `inner[:gm.start()]`
-    # never ends in whitespace or a stray comma.
-    gm = re.search(
-        r",?\s*groups\s*=\s*(affine_set<.*?>)\s*$", inner, re.DOTALL
-    )
-    if gm:
-        groups_str = gm.group(1).strip()
-        partials_text = inner[: gm.start()]
+    # Peel off the optional ``groups = <affine-set>`` clause first, so the
+    # partial-types list below is not confused by commas inside the affine
+    # set — split_top_level counts (), [] but not <>. extract_named_attr
+    # scans <> depth correctly for keyword<...> values. Locate the key
+    # position separately so the trailing clause (including any leading
+    # ``,\s*`` separator) can be stripped from ``partials_text``.
+    groups_str = extract_named_attr(inner, "groups")
+    if groups_str is not None:
+        key_m = re.search(r",?\s*\bgroups\s*=", inner)
+        partials_text = inner[: key_m.start()]
     else:
-        groups_str = None
         partials_text = inner
 
     # A partial-types list wrapped in parentheses is one top-level token

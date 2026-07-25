@@ -30,7 +30,7 @@ dev = [
 ]
 # No PyPI release yet; built from source via setup_mlir.py (see CONTRIBUTING.md).
 mlir-frontend = [
-    "ktir-mlir-frontend @ git+https://github.com/torch-spyre/ktir-mlir-frontend@5268656f108edaf50a61e573f9f8c4442479a335",
+    "ktir-mlir-frontend @ git+https://github.com/torch-spyre/ktir-mlir-frontend@973d67ee7d535ea41f4adbf9c6eb4ee59450672b",
 ]
 
 [tool.setuptools_scm]

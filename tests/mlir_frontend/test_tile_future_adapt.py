@@ -63,29 +63,29 @@ class TestTileFutureType:
             #ptpg      = affine_set<(i)[g] : (i - g == 0, i >= 0, -i + 3 >= 0)>
             #one_group = affine_set<(g) : (g == 0)>
             module {
-              func.func @_k(%p: tensor<1x64xf16>) -> tensor<1x64xf16>
+              func.func @_k(%p: tensor<64xf16>) -> tensor<64xf16>
                   attributes { grid = [4] }
               {
                 %f = ktdp.inter_tile_produce
                     producer_tiles_per_group = #ptpg
-                    -> <(tensor<1x64xf16>), groups = #one_group>
+                    -> <(tensor<64xf16>), groups = #one_group>
                 {
                   ^bb0(%gid: index):
-                    ktdp.yield_partial %p : tensor<1x64xf16>
+                    ktdp.yield_partial %p : tensor<64xf16>
                 }
-                %id = tensor.empty() : tensor<1x64xf16>
+                %id = tensor.empty() : tensor<64xf16>
                 %r = ktdp.inter_tile_reduce(%f)
                     consumer_tiles_per_group = #ptpg,
-                    identity(%id : tensor<1x64xf16>)
-                    : <(tensor<1x64xf16>), groups = #one_group> -> tensor<1x64xf16>
+                    identity(%id : tensor<64xf16>)
+                    : <(tensor<64xf16>), groups = #one_group> -> tensor<64xf16>
                 {
-                  ^bb0(%lhs: tensor<1x64xf16>, %rhs: tensor<1x64xf16>):
-                    %sum = linalg.add ins(%lhs, %rhs : tensor<1x64xf16>, tensor<1x64xf16>)
-                                      outs(%lhs : tensor<1x64xf16>)
-                                      -> tensor<1x64xf16>
-                    ktdp.yield_reduced %sum : tensor<1x64xf16>
+                  ^bb0(%lhs: tensor<64xf16>, %rhs: tensor<64xf16>):
+                    %sum = linalg.add ins(%lhs, %rhs : tensor<64xf16>, tensor<64xf16>)
+                                      outs(%lhs : tensor<64xf16>)
+                                      -> tensor<64xf16>
+                    ktdp.yield_reduced %sum : tensor<64xf16>
                 }
-                return %r : tensor<1x64xf16>
+                return %r : tensor<64xf16>
               }
             }
             """)
@@ -102,7 +102,7 @@ class TestTileFutureType:
         """
         produce = _first_op(parsed_module, "_k", "ktdp.inter_tile_produce")
         assert produce.attributes["partial_tensor_types"] == (
-            "tensor<1x64xf16>",
+            "tensor<64xf16>",
         )
         _assert_same_set(
             produce.attributes["groups"], "affine_set<(g) : (g == 0)>"
@@ -141,10 +141,10 @@ class TestParseTileFutureType:
     def test_parenthesised_partials_with_groups(self):
         """Parenthesised single-role partials with an embedded groups clause."""
         partials, groups = _parse_tile_future_type(
-            "!ktdp.tile_future<(tensor<1x64xf16>), groups = affine_set<(g) : (g == 0)>>",
+            "!ktdp.tile_future<(tensor<64xf16>), groups = affine_set<(g) : (g == 0)>>",
             context="test",
         )
-        assert partials == ("tensor<1x64xf16>",)
+        assert partials == ("tensor<64xf16>",)
         assert groups == "affine_set<(g) : (g == 0)>"
 
     def test_parenthesised_multi_role_partials(self):
