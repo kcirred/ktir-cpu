@@ -103,18 +103,53 @@ class ParseTestMixin:
         ``prelude`` is an optional string of MLIR op text placed before
         ``op_text`` in the function body. Use it when the op under test
         needs an SSA value whose *type* cannot appear in the ``func.func``
-        signature — for example ``ktdp.inter_tile_reduce`` consumes a
-        ``!ktdp.tile_future`` value whose type parameter carries commas
-        the MLIR arg-list parser cannot split. Preface with the producing
-        op instead so the value is defined in-body::
+        signature.
+
+        Why this matters in the new form. Since ``groups`` is now a
+        clause **inside** the ``!ktdp.tile_future<...>`` type parameter
+        (rather than a bare op-attribute), the operand type of
+        ``ktdp.inter_tile_reduce`` looks like::
+
+            !ktdp.tile_future<tensor<64xf16>, groups = affine_set<(g) : (g == 0)>>
+
+        The ``func.func`` argument-list parser splits argument entries on
+        any comma it sees — it does not track ``<>`` depth. So even one
+        comma inside the type is fatal. Declaring::
+
+            func.func @_test(%f: !ktdp.tile_future<tensor<64xf16>,
+                                                    groups = affine_set<(g) : (g == 0)>>) { ... }
+                                                  ^ arg-list splits here
+
+        breaks the signature into two malformed argument entries:
+        ``%f: !ktdp.tile_future<tensor<64xf16>`` (unterminated type) and
+        ``groups = affine_set<(g) : (g == 0)>>`` (not even a name:type
+        pair). Adding a multi-constraint ``affine_set<..., ...>`` would
+        introduce more commas and split the signature further, but the
+        one comma before ``groups =`` alone is enough to break it.
+
+        The bare op-attribute spelling didn't have this problem — the
+        type used to be just ``!ktdp.tile_future<tensor<64xf16>>``, a
+        single comma-free token — so the reduce test could simply
+        declare ``%f`` as a func-arg.
+
+        With the new form, the fix is to define the value *in the body*
+        instead of the signature: put an ``inter_tile_produce`` in the
+        prelude so ``%f`` is a normal in-body SSA value that the parser
+        already knows how to handle (in-body op parsing does track ``<>``
+        depth via ``split_top_level``, so commas inside the type are
+        safe there)::
 
             self._parse(
                 "%r = ktdp.inter_tile_reduce(%f) ...",
                 prelude="%f = ktdp.inter_tile_produce ...",
             )
 
-        With a prelude, ``_parse`` returns the *last* non-return op — the
-        op ``op_text`` describes — rather than the first.
+        The same trick applies to any future op whose result type
+        contains commas: build the value in the prelude, not the
+        signature.
+
+        With a prelude, ``_parse`` returns the *last* non-return op —
+        the op ``op_text`` describes — rather than the first.
         """
         # Validate declared arg names against op_text plus the prelude —
         # a prelude op can reference the same func-arg (e.g. a producing op

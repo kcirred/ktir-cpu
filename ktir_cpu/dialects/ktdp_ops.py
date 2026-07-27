@@ -998,31 +998,44 @@ def _extract_tile_future_result_type(op_text: str) -> str:
     which spelling appeared in the input. Raises ``ValueError`` if
     neither form is found after a ``->`` token.
     """
-    # Nested angle-bracket depth is scanned via `_scan_angle_bracketed`, which
-    # correctly skips the constraint operator `>=` and the affine-map arrow
-    # `->` — critical because the type parameter can contain
-    # `affine_set<(g) : (g >= 0, -g + 3 >= 0)>`. A naive `>` scan terminates
-    # at the first `>=` and truncates the extracted type.
+    # `_scan_angle_bracketed` walks angle-bracket depth from a starting
+    # `<`, skipping the constraint operator `>=` and the affine-map arrow
+    # `->` so they are not mistaken for closing brackets. It returns the
+    # index one past the matching `>` on success, or `None` if the string
+    # ended before depth returned to zero — that's how we detect an
+    # unterminated type and raise a clean diagnostic here rather than
+    # silently returning the whole tail of `op_text`.
     m = re.search(r'!ktdp\.tile_future<', op_text)
     if m is not None:
         start = m.end() - 1  # index of '<'
         end = _scan_angle_bracketed(op_text, start)
-        if end > start:
-            return op_text[m.start(): end]
+        if end is None:
+            raise ValueError(
+                "ktdp.inter_tile_produce/reduce: unterminated "
+                "!ktdp.tile_future<...> type"
+            )
+        return op_text[m.start(): end]
+
+    # Shortened form: the tile_future is the type immediately after the
+    # trailing `->` (produce) or the trailing `:` (reduce). Anchor to the
+    # LAST `->` or `:` that is followed by `<` so earlier tokens (e.g.
+    # `%id : tensor<...>` inside an identity clause) cannot false-match.
+    matches = list(re.finditer(r'(?:->|:)\s*<', op_text))
+    if not matches:
         raise ValueError(
-            "ktdp.inter_tile_produce/reduce: unterminated "
+            "ktdp.inter_tile_produce/reduce: missing "
             "!ktdp.tile_future<...> type"
         )
-    # Shortened form: `-> <...>` (produce) or `: <...> ->` (reduce).
-    for arrow in re.finditer(r'(?:->|:)\s*<', op_text):
-        start = arrow.end() - 1
-        end = _scan_angle_bracketed(op_text, start)
-        if end > start and end <= len(op_text):
-            inner = op_text[start + 1: end - 1]
-            return f"!ktdp.tile_future<{inner}>"
-    raise ValueError(
-        "ktdp.inter_tile_produce/reduce: missing !ktdp.tile_future<...> type"
-    )
+    last = matches[-1]
+    start = last.end() - 1  # index of '<'
+    end = _scan_angle_bracketed(op_text, start)
+    if end is None:
+        raise ValueError(
+            "ktdp.inter_tile_produce/reduce: unterminated "
+            "shortened tile_future <...> type"
+        )
+    inner = op_text[start + 1: end - 1]
+    return f"!ktdp.tile_future<{inner}>"
 
 
 @register_parser("ktdp.inter_tile_produce")

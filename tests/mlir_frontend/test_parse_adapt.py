@@ -49,10 +49,32 @@ class MLIRFrontendParseTestMixin:
         The op is wrapped in a synthetic ``func.func`` so it can reference
         SSA values (``args``) with explicit types. ``prelude`` is optional
         extra op text placed *above* ``op_text`` in the function body — use
-        it when the op under test consumes a value whose type cannot appear
-        in the function signature (e.g. ``!ktdp.tile_future<T, groups = ...>``,
-        whose type parameter contains commas the arg-list parser cannot
-        split).
+        it when the op under test consumes a value whose type contains a
+        comma the ``func.func`` arg-list parser would split on.
+
+        Concretely, that's any ``!ktdp.tile_future<T, groups = affine_set<...>>``
+        operand: the type has one comma between the partial-tensor list
+        and the ``groups =`` clause. The arg-list parser doesn't track
+        ``<>`` depth, so declaring it as a func-arg::
+
+            func.func @_test(%f: !ktdp.tile_future<tensor<64xf16>,
+                                                    groups = affine_set<(g) : (g == 0)>>) ...
+                                                  ^ arg-list splits here
+
+        breaks the signature into two malformed argument entries — an
+        unterminated type on one side and a bare ``groups = ...`` clause
+        on the other. Instead, define the value in the body via a
+        prelude op::
+
+            self._parse(
+                "%r = ktdp.inter_tile_reduce(%f) ...",
+                prelude="%f = ktdp.inter_tile_produce ...",
+            )
+
+        The old op-attribute spelling of ``groups`` did not have this
+        problem — the type used to be a single comma-free token. This
+        prelude escape hatch is what made the migration to the new form
+        possible without adding a comma-tolerant arg-list parser.
 
         Wrapper module shape::
 

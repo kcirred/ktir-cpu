@@ -351,12 +351,13 @@ def parse_attr_list(op_text: str, aliases: Optional[Dict] = None,
     return result
 
 
-def _scan_angle_bracketed(text: str, start: int) -> int:
+def _scan_angle_bracketed(text: str, start: int) -> Optional[int]:
     """Return the index one past the closing ``>`` of an angle-bracketed span.
 
     *start* must point at the opening ``<``.  Skips ``>=`` (constraint
     operator) and ``->`` (affine_map arrow) so they are not mistaken for
-    closing brackets.  Returns ``len(text)`` if no matching ``>`` is found.
+    closing brackets.  Returns ``None`` when the string ends before depth
+    returns to zero — i.e. no matching ``>`` was found.
     """
     depth = 0
     i = start
@@ -375,7 +376,7 @@ def _scan_angle_bracketed(text: str, start: int) -> int:
             if depth == 0:
                 return i + 1
         i += 1
-    return len(text)
+    return None
 
 
 def extract_named_attr(op_text: str, key: str,
@@ -406,6 +407,11 @@ def extract_named_attr(op_text: str, key: str,
     kw_m = re.match(r'[\w.]+<', rest)
     if kw_m:
         end = _scan_angle_bracketed(rest, kw_m.end() - 1)
+        if end is None:
+            raise ValueError(
+                f"extract_named_attr: unterminated {key} = {kw_m.group(0)}...> "
+                f"attribute in {op_text!r}"
+            )
         return rest[:end]
 
     # Plain token up to next comma / newline / brace / colon / arrow.
@@ -436,6 +442,11 @@ def _extract_attr_value(text: str, aliases: Optional[Dict]) -> tuple:
     kw_m = re.match(r'[\w.]+<', stripped)
     if kw_m:
         end = _scan_angle_bracketed(stripped, kw_m.end() - 1)
+        if end is None:
+            raise ValueError(
+                f"_extract_attr_value: unterminated {kw_m.group(0)}...> "
+                f"attribute in {text!r}"
+            )
         return stripped[:end], skip + end
 
     # Plain token up to next comma or closing brace
