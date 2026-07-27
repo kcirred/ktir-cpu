@@ -493,3 +493,68 @@ def _coerce_attr_value(value_str: str):
         except ValueError:
             pass
     return value_str
+
+
+def parse_tile_future_type(type_str: str, *, context: str):
+    """Parse a ``!ktdp.tile_future<...>`` type string.
+
+    The grammar accepted here has an optional ``groups`` clause and a
+    partial-types list that is either bare or wrapped in one pair of
+    parentheses::
+
+        !ktdp.tile_future< partial_types [, groups = <affine-set>] >
+        partial_types    ::= type | "(" type ("," type)* ")"
+
+    Returns a ``(partial_types, groups_str)`` pair.
+
+    ``partial_types`` is a tuple of type-string tokens for the roles
+    carried by the future (one entry per role).
+
+    ``groups_str`` is the raw ``affine_set<...>`` text when the type
+    embeds a ``groups`` clause, or ``None`` when it does not; callers
+    should then read ``groups`` from the op's own attribute dict.
+
+    ``context`` is a short label identifying the caller (op name plus
+    the role of the type — e.g. ``"ktdp.inter_tile_produce result"``,
+    ``"ktdp.inter_tile_reduce operand 0"``); it is folded into the
+    ``ValueError`` on a malformed type so diagnostics identify the site.
+
+    Lives in ``parser_utils`` (rather than a parser-specific module) so
+    both the regex parser (``dialects/ktdp_ops.py``) and the MLIR
+    frontend adapter (``mlir_frontend/parser.py``) can share it and
+    agree on the accepted grammar.
+    """
+    m = re.match(r"!ktdp\.tile_future<(.+)>", type_str or "")
+    if not m:
+        raise ValueError(
+            f"{context}: cannot parse tile_future type {type_str!r}"
+        )
+    inner = m.group(1).strip()
+
+    # Peel off the optional ``groups = <affine-set>`` clause first, so the
+    # partial-types list below is not confused by commas inside the affine
+    # set — split_top_level counts (), [] but not <>. extract_named_attr
+    # scans <> depth correctly for keyword<...> values. Locate the key
+    # position separately so the trailing clause (including any leading
+    # ``,\s*`` separator) can be stripped from ``partials_text``.
+    groups_str = extract_named_attr(inner, "groups")
+    if groups_str is not None:
+        key_m = re.search(r",?\s*\bgroups\s*=", inner)
+        # extract_named_attr found "groups", so the key literal is present
+        # in `inner`; the re.search must therefore also match.
+        assert key_m is not None
+        partials_text = inner[: key_m.start()]
+    else:
+        partials_text = inner
+
+    # A partial-types list wrapped in parentheses is one top-level token
+    # after peeling the groups clause. Strip the parens; whichever form
+    # we're left with, split_top_level yields the per-role types.
+    partials_text = partials_text.strip()
+    if partials_text.startswith("(") and partials_text.endswith(")"):
+        partials_text = partials_text[1:-1]
+    partial_types = tuple(
+        p.strip() for p in split_top_level(partials_text) if p.strip()
+    )
+
+    return partial_types, groups_str

@@ -40,6 +40,7 @@ import pytest
 
 from ktir_cpu.parser import KTIRParser
 from ktir_cpu.dialects.registry import dispatch_parser, make_parse_context
+from ktir_cpu.parser_ast import parse_affine_set
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -71,7 +72,7 @@ class ParseTestMixin:
         the MLIR frontend parser uses positional %argN names.
     """
 
-    def _parse(self, op_text, parse_ctx=None, args=None):
+    def _parse(self, op_text, parse_ctx=None, args=None, prelude=None):
         """Parse a single op and return the resulting Operation.
 
         ``args`` is an optional ``{name: mlir_type}`` mapping that declares
@@ -98,12 +99,32 @@ class ParseTestMixin:
 
         If ``args`` is provided, every declared name must appear in
         ``op_text``.
+
+        ``prelude`` is an optional string of MLIR op text placed before
+        ``op_text`` in the function body. Use it when the op under test
+        needs an SSA value whose *type* cannot appear in the ``func.func``
+        signature — for example ``ktdp.inter_tile_reduce`` consumes a
+        ``!ktdp.tile_future`` value whose type parameter carries commas
+        the MLIR arg-list parser cannot split. Preface with the producing
+        op instead so the value is defined in-body::
+
+            self._parse(
+                "%r = ktdp.inter_tile_reduce(%f) ...",
+                prelude="%f = ktdp.inter_tile_produce ...",
+            )
+
+        With a prelude, ``_parse`` returns the *last* non-return op — the
+        op ``op_text`` describes — rather than the first.
         """
-        args = self._resolve_args(op_text, args)
+        # Validate declared arg names against op_text plus the prelude —
+        # a prelude op can reference the same func-arg (e.g. a producing op
+        # that consumes ``%p``) without that name appearing in op_text.
+        args = self._resolve_args(f"{prelude or ''}\n{op_text}", args)
         ctx = parse_ctx or _parse_ctx()
-        ops = KTIRParser()._parse_operations(op_text, ctx)
+        body = f"{prelude}\n{op_text}" if prelude else op_text
+        ops = KTIRParser()._parse_operations(body, ctx)
         assert ops, f"No op parsed from: {op_text!r}"
-        return ops[0]
+        return ops[-1] if prelude else ops[0]
 
     def _resolve_args(self, op_text, args):
         """Normalise and validate the args schema against op_text.
@@ -1069,6 +1090,111 @@ class TestKtdpParsers(ParseTestMixin):
         )
         self.assert_op_type(op, "ktdp.construct_access_tile")
         self.assert_attribute(op, "shape", (1024,))
+
+    # -- inter_tile_produce / inter_tile_reduce -------------------------------
+    #
+    # `groups` is placed inside the `!ktdp.tile_future` type parameter.
+    # The MLIR frontend's custom parser prints and requires the
+    # ``!ktdp.tile_future`` prefix to be elided after ``->`` / ``:``,
+    # leaving only the ``<partials [, groups = <affine-set>]>`` block::
+    #
+    #     -> < partial_types , groups = <affine-set> >
+    #     :  < partial_types , groups = <affine-set> > -> result_type
+    #
+    # Both the regex parser (``ktir_cpu/dialects/ktdp_ops.py``) and the MLIR
+    # frontend accept this shortened spelling, so the tests live in the
+    # shared base and run on both parsers via inheritance. The regex parser
+    # also accepts a legacy op-attribute ``groups = ...`` form as a fallback
+    # via ``_resolve_inter_tile_groups``; tests for that spelling would only
+    # run on the regex path (the current MLIR frontend refuses it) and are
+    # not included here.
+
+    def test_inter_tile_produce(self):
+        # `groups` embedded in the result tile_future type. Both parsers
+        # must extract producer / groups affine sets and the single-role
+        # ``partial_tensor_types`` tuple.
+        #
+        # The op header stays on a single physical line because the regex
+        # tokenizer's ``_is_op_complete`` heuristic mis-flushes when an
+        # attribute line ends in a bare ``>`` (from ``affine_set<...>``)
+        # while a ``:`` appears earlier on the same line (as in
+        # ``(g) : (g == 0)>``). Real code sidesteps this by using
+        # ``#alias`` references; tests use inline sets, so the header must
+        # stay on one line.
+        op = self._parse(
+            "%f = ktdp.inter_tile_produce"
+            " producer_tiles_per_group ="
+            " affine_set<(i)[g] : (i - g == 0, i >= 0, -i + 3 >= 0)>"
+            " -> <(tensor<64xf16>),"
+            " groups = affine_set<(g) : (g == 0)>>\n"
+            "    {\n"
+            "      ^bb0(%gid: index):\n"
+            "        ktdp.yield_partial %p : tensor<64xf16>\n"
+            "    }",
+            args={"%p": "tensor<64xf16>"},
+        )
+        self.assert_op_type(op, "ktdp.inter_tile_produce")
+        self.assert_attribute(
+            op, "partial_tensor_types", ("tensor<64xf16>",)
+        )
+        # `groups` is stored as a parsed AffineSet or BoxSet (the parser
+        # lowers axis-aligned sets to BoxSet at parse time); compare against
+        # a freshly-parsed expected value so the equality holds regardless
+        # of the internal representation choice.
+        self.assert_attribute(
+            op, "groups", parse_affine_set("affine_set<(g) : (g == 0)>")
+        )
+
+    def test_inter_tile_reduce(self):
+        # `groups` embedded in operand 0's tile_future type. Result type is
+        # ``tensor<64xf16>`` (the within-group tile axis has been collapsed).
+        # The op-attribute ``consumer_tiles_per_group`` must survive parsing
+        # unmodified. See ``test_inter_tile_produce`` for why the header
+        # stays on one line.
+        #
+        # ``%f`` is defined by a producing op in the prelude rather than
+        # declared as a func-arg: the ``!ktdp.tile_future<T, groups = ...>``
+        # type parameter contains commas that the MLIR arg-list parser
+        # cannot split at the ``func.func`` signature level.
+        op = self._parse(
+            "%r = ktdp.inter_tile_reduce(%f)"
+            " consumer_tiles_per_group ="
+            " affine_set<(i)[g] : (i - g == 0, i >= 0, -i + 3 >= 0)>,"
+            " identity(%id : tensor<64xf16>)"
+            " : <(tensor<64xf16>),"
+            " groups = affine_set<(g) : (g == 0)>> -> tensor<64xf16>\n"
+            "    {\n"
+            "      ^bb0(%lhs: tensor<64xf16>, %rhs: tensor<64xf16>):\n"
+            "        %s = linalg.add"
+            " ins(%lhs, %rhs : tensor<64xf16>, tensor<64xf16>)"
+            "                        outs(%lhs : tensor<64xf16>)"
+            " -> tensor<64xf16>\n"
+            "        ktdp.yield_reduced %s : tensor<64xf16>\n"
+            "    }",
+            args={"%id": "tensor<64xf16>", "%p": "tensor<64xf16>"},
+            prelude=(
+                "%f = ktdp.inter_tile_produce"
+                " producer_tiles_per_group ="
+                " affine_set<(i)[g] : (i - g == 0, i >= 0, -i + 3 >= 0)>"
+                " -> <(tensor<64xf16>),"
+                " groups = affine_set<(g) : (g == 0)>>\n"
+                "    {\n"
+                "      ^bb0(%gid: index):\n"
+                "        ktdp.yield_partial %p : tensor<64xf16>\n"
+                "    }"
+            ),
+        )
+        self.assert_op_type(op, "ktdp.inter_tile_reduce")
+        self.assert_attribute(
+            op, "groups", parse_affine_set("affine_set<(g) : (g == 0)>")
+        )
+        self.assert_attribute(
+            op,
+            "consumer_tiles_per_group",
+            parse_affine_set(
+                "affine_set<(i)[g] : (i - g == 0, i >= 0, -i + 3 >= 0)>"
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

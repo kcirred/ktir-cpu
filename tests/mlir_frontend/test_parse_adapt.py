@@ -43,22 +43,69 @@ class MLIRFrontendParseTestMixin:
         else:
             super().assert_attribute(op, key, value, transform=transform)
 
-    def _parse(self, op_text, parse_ctx=None, args=None):
-        args = self._resolve_args(op_text, args)
-        sig = ", ".join(f"{n}: {t}" for n, t in args.items())
+    def _parse(self, op_text, parse_ctx=None, args=None, prelude=None):
+        """Parse ``op_text`` through the MLIR frontend and return the op under test.
+
+        The op is wrapped in a synthetic ``func.func`` so it can reference
+        SSA values (``args``) with explicit types. ``prelude`` is optional
+        extra op text placed *above* ``op_text`` in the function body — use
+        it when the op under test consumes a value whose type cannot appear
+        in the function signature (e.g. ``!ktdp.tile_future<T, groups = ...>``,
+        whose type parameter contains commas the arg-list parser cannot
+        split).
+
+        Wrapper module shape::
+
+            module {
+              func.func @_test(<func_args>) attributes { grid = [1] } {
+                <prelude>          # only if prelude is not None
+                <op_text>          # the op under test — this is what we return
+                return
+              }
+            }
+
+        The ``grid = [1]`` on the wrapper func is inert scaffolding, not part
+        of what these tests cover. ``MLIRFrontendParser._build_ir_function``
+        reads ``grid`` off the func to populate ``IRFunction.grid``, but the
+        MLIR verifier treats it as an opaque ``ArrayAttr`` — it is never
+        cross-checked against any op inside the body (e.g. the ``groups``
+        affine set on ``!ktdp.tile_future``). Bumping the value here would
+        not exercise any additional parse path, and no assertion in this
+        file inspects it. End-to-end validation of ``grid > 1`` intertile
+        behavior lives in the execution tests (see the ``ring_reduce`` and
+        ``ring_reduce_multi_group`` entries in ``tests/conftest.py``), which
+        build a ``GridExecutor`` with ``num_cores = math.prod(meta.grid)``
+        and check numerical output across cores.
+
+        Returns the parsed ``op_text`` op. It is always the *last* non-return
+        op in the body: without a prelude that's the only body op; with a
+        prelude the prelude ops come first and ``op_text`` is appended after.
+
+        See ``ParseTestMixin._parse`` for the full ``prelude`` / ``args``
+        contract shared with the regex-parser tests.
+        """
+        # `args` declares external SSA values (name → MLIR type). Validate
+        # names against both prelude and op_text — a prelude op may consume
+        # a declared value that never appears in op_text itself.
+        args = self._resolve_args(f"{prelude or ''}\n{op_text}", args)
+        func_args = ", ".join(f"{name}: {mlir_type}" for name, mlir_type in args.items())
+        body = f"{prelude}\n    {op_text}" if prelude else op_text
         module_text = f"""\
 module {{
-  func.func @_test({sig}) attributes {{ grid = [1] }} {{
-    {op_text}
+  func.func @_test({func_args}) attributes {{ grid = [1] }} {{
+    {body}
     return
   }}
 }}
 """
         ir_module = MLIRFrontendParser().parse_module(module_text)
+        op_under_test = None
         for op in ir_module.get_function("_test").operations:
             if op.op_type not in ("func.return", "return"):
-                return op
-        raise RuntimeError(f"No target op found in:\n{module_text}")
+                op_under_test = op
+        if op_under_test is None:
+            raise RuntimeError(f"No op parsed from:\n{module_text}")
+        return op_under_test
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +148,9 @@ class TestKtdpAdapt(MLIRFrontendParseTestMixin, _TestKtdpParsers):
     # test_construct_memory_view_ssa_size_as_operand: inherited
 
     # test_construct_memory_view_multi_dim_mixed_static_dynamic: inherited
+
+    # test_inter_tile_produce: inherited (groups embedded in tile_future type)
+    # test_inter_tile_reduce:  inherited (groups embedded in tile_future type)
 
 
 # ---------------------------------------------------------------------------

@@ -682,88 +682,36 @@ def _adapt_tensor_generate(mlir_op, attributes, result_type, operands):
     attributes["dtype"] = info["dtype"]
 
 
-def _parse_tile_future_type(type_str, *, context):
-    """Parse a ``!ktdp.tile_future<...>`` type string.
+# The tile_future type grammar is shared between the MLIR frontend and the
+# regex parser (`dialects/ktdp_ops.py`). Both call the same helper in
+# `parser_utils` so they agree on what's a valid tile_future type. Kept
+# under the module-private alias `_parse_tile_future_type` because the
+# ``_adapt_*`` handlers below already reference it by that name.
+from ..parser_utils import parse_tile_future_type as _parse_tile_future_type  # noqa: E402
 
-    The grammar accepted by this parser has an optional ``groups`` clause
-    and a partial-types list that is either bare or wrapped in one pair of
-    parentheses::
 
-        !ktdp.tile_future< partial_types [, groups = <affine-set>] >
-        partial_types    ::= type | "(" type ("," type)* ")"
+def _require_groups_from_type(groups_str, *, context):
+    """Parse the ``groups`` affine set extracted from a tile_future type.
 
-    Returns a ``(partial_types, groups_str)`` pair.
-
-    ``partial_types`` is a tuple of type-string tokens for the roles
-    carried by the future (one entry per role).
-
-    ``groups_str`` is the raw ``affine_set<...>`` text when the type
-    embeds a ``groups`` clause, or ``None`` when it does not; callers
-    should then read ``groups`` from the op's own attribute dict.
-
-    ``context`` is a short label identifying the caller (op name plus the
-    role of the type — e.g. ``"ktdp.inter_tile_produce result"``,
-    ``"ktdp.inter_tile_reduce operand 0"``); it is folded into the
-    ``ValueError`` on a malformed type so diagnostics identify the site.
+    ``groups`` must appear inside the ``!ktdp.tile_future<...>`` type — the
+    op-attribute spelling is no longer accepted. Raises ``ValueError`` if
+    ``groups_str`` is ``None`` (i.e. the type did not carry a ``groups``
+    clause). ``context`` names the op for diagnostics.
     """
-    from ..parser_utils import extract_named_attr, split_top_level
-    m = re.match(r"!ktdp\.tile_future<(.+)>", type_str or "")
-    if not m:
+    if groups_str is None:
         raise ValueError(
-            f"{context}: cannot parse tile_future type {type_str!r}"
+            f"{context}: missing groups inside !ktdp.tile_future<...> type"
         )
-    inner = m.group(1).strip()
-
-    # Peel off the optional ``groups = <affine-set>`` clause first, so the
-    # partial-types list below is not confused by commas inside the affine
-    # set — split_top_level counts (), [] but not <>. extract_named_attr
-    # scans <> depth correctly for keyword<...> values. Locate the key
-    # position separately so the trailing clause (including any leading
-    # ``,\s*`` separator) can be stripped from ``partials_text``.
-    groups_str = extract_named_attr(inner, "groups")
-    if groups_str is not None:
-        key_m = re.search(r",?\s*\bgroups\s*=", inner)
-        partials_text = inner[: key_m.start()]
-    else:
-        partials_text = inner
-
-    # A partial-types list wrapped in parentheses is one top-level token
-    # after peeling the groups clause. Strip the parens; whichever form
-    # we're left with, split_top_level yields the per-role types.
-    partials_text = partials_text.strip()
-    if partials_text.startswith("(") and partials_text.endswith(")"):
-        partials_text = partials_text[1:-1]
-    partial_types = tuple(
-        p.strip() for p in split_top_level(partials_text) if p.strip()
-    )
-
-    return partial_types, groups_str
-
-
-def _resolve_groups(groups_str, mlir_op, *, context):
-    """Return the parsed ``groups`` affine set for an inter-tile op.
-
-    Prefers the type-parameter form (``groups_str`` non-None). Falls back
-    to the op's own ``groups`` attribute; raises ``ValueError`` if neither
-    location holds it. ``context`` names the op for diagnostics.
-    """
-    if groups_str is not None:
-        return parse_affine_set(groups_str)
-    if "groups" in mlir_op.attributes:
-        return parse_affine_set(str(mlir_op.attributes["groups"]))
-    raise ValueError(
-        f"{context}: missing groups (neither in !ktdp.tile_future type nor "
-        f"as an op attribute)"
-    )
+    return parse_affine_set(groups_str)
 
 
 @MLIRTypeAdapter.install("ktdp.inter_tile_produce")
 def _adapt_inter_tile_produce(mlir_op, attributes, result_type, operands):
     """Extract producer_tiles_per_group, groups, and partial_tensor_types.
 
-    ``groups`` is read from the ``!ktdp.tile_future`` result type when it
-    embeds a ``groups`` clause, and otherwise from the op's ``groups``
-    attribute. Either location is legal IR; the parser accepts both.
+    ``groups`` is read from the ``!ktdp.tile_future`` result type's
+    ``groups`` clause; the earlier op-attribute spelling is no longer
+    accepted.
     """
     ctx = "ktdp.inter_tile_produce"
     attributes["producer_tiles_per_group"] = parse_affine_set(
@@ -772,7 +720,7 @@ def _adapt_inter_tile_produce(mlir_op, attributes, result_type, operands):
     partial_types, groups_str = _parse_tile_future_type(
         result_type, context=f"{ctx} result"
     )
-    attributes["groups"] = _resolve_groups(groups_str, mlir_op, context=ctx)
+    attributes["groups"] = _require_groups_from_type(groups_str, context=ctx)
     attributes["partial_tensor_types"] = partial_types
 
 
@@ -781,24 +729,31 @@ def _adapt_inter_tile_reduce(mlir_op, attributes, result_type, operands):
     """Extract consumer_tiles_per_group, groups, optional producer_dependency_per_consumer,
     and _result_shape.
 
-    ``groups`` is read from operand 0's ``!ktdp.tile_future`` type when it
-    embeds a ``groups`` clause (operand 0 is the future produced by
-    ``ktdp.inter_tile_produce``), and otherwise from the op's ``groups``
-    attribute.
+    ``groups`` is read from operand 0's ``!ktdp.tile_future`` type's
+    ``groups`` clause (operand 0 is the future produced by
+    ``ktdp.inter_tile_produce``); the earlier op-attribute spelling is
+    no longer accepted.
     """
     from ..parser_utils import parse_tensor_or_memref_type
     ctx = "ktdp.inter_tile_reduce"
     attributes["consumer_tiles_per_group"] = parse_affine_set(
         str(mlir_op.attributes["consumer_tiles_per_group"])
     )
-    groups_str = None
-    if mlir_op.operands:
-        future_type = str(mlir_op.operands[0].type)
-        if future_type.startswith("!ktdp.tile_future"):
-            _, groups_str = _parse_tile_future_type(
-                future_type, context=f"{ctx} operand 0"
-            )
-    attributes["groups"] = _resolve_groups(groups_str, mlir_op, context=ctx)
+    if not mlir_op.operands:
+        raise ValueError(
+            f"{ctx}: expected operand 0 to be a !ktdp.tile_future, "
+            f"got no operands"
+        )
+    future_type = str(mlir_op.operands[0].type)
+    if not future_type.startswith("!ktdp.tile_future"):
+        raise ValueError(
+            f"{ctx}: expected operand 0 to be a !ktdp.tile_future type, "
+            f"got {future_type!r}"
+        )
+    _, groups_str = _parse_tile_future_type(
+        future_type, context=f"{ctx} operand 0"
+    )
+    attributes["groups"] = _require_groups_from_type(groups_str, context=ctx)
     if "producer_dependency_per_consumer" in mlir_op.attributes:
         attributes["producer_dependency_per_consumer"] = parse_affine_set(
             str(mlir_op.attributes["producer_dependency_per_consumer"])
