@@ -682,14 +682,6 @@ def _adapt_tensor_generate(mlir_op, attributes, result_type, operands):
     attributes["dtype"] = info["dtype"]
 
 
-# The tile_future type grammar is shared between the MLIR frontend and the
-# regex parser (`dialects/ktdp_ops.py`). Both call the same helper in
-# `parser_utils` so they agree on what's a valid tile_future type. Kept
-# under the module-private alias `_parse_tile_future_type` because the
-# ``_adapt_*`` handlers below already reference it by that name.
-from ..parser_utils import parse_tile_future_type as _parse_tile_future_type  # noqa: E402
-
-
 def _require_groups_from_type(groups_str, *, context):
     """Parse the ``groups`` affine set extracted from a tile_future type.
 
@@ -713,11 +705,12 @@ def _adapt_inter_tile_produce(mlir_op, attributes, result_type, operands):
     ``groups`` clause; the earlier op-attribute spelling is no longer
     accepted.
     """
+    from ..parser_utils import parse_tile_future_type
     ctx = "ktdp.inter_tile_produce"
     attributes["producer_tiles_per_group"] = parse_affine_set(
         str(mlir_op.attributes["producer_tiles_per_group"])
     )
-    partial_types, groups_str = _parse_tile_future_type(
+    partial_types, groups_str = parse_tile_future_type(
         result_type, context=f"{ctx} result"
     )
     attributes["groups"] = _require_groups_from_type(groups_str, context=ctx)
@@ -734,7 +727,7 @@ def _adapt_inter_tile_reduce(mlir_op, attributes, result_type, operands):
     ``ktdp.inter_tile_produce``); the earlier op-attribute spelling is
     no longer accepted.
     """
-    from ..parser_utils import parse_tensor_or_memref_type
+    from ..parser_utils import parse_tensor_or_memref_type, parse_tile_future_type
     ctx = "ktdp.inter_tile_reduce"
     attributes["consumer_tiles_per_group"] = parse_affine_set(
         str(mlir_op.attributes["consumer_tiles_per_group"])
@@ -750,7 +743,7 @@ def _adapt_inter_tile_reduce(mlir_op, attributes, result_type, operands):
             f"{ctx}: expected operand 0 to be a !ktdp.tile_future type, "
             f"got {future_type!r}"
         )
-    _, groups_str = _parse_tile_future_type(
+    _, groups_str = parse_tile_future_type(
         future_type, context=f"{ctx} operand 0"
     )
     attributes["groups"] = _require_groups_from_type(groups_str, context=ctx)

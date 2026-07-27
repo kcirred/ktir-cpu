@@ -46,65 +46,32 @@ class MLIRFrontendParseTestMixin:
     def _parse(self, op_text, parse_ctx=None, args=None, prelude=None):
         """Parse ``op_text`` through the MLIR frontend and return the op under test.
 
-        The op is wrapped in a synthetic ``func.func`` so it can reference
-        SSA values (``args``) with explicit types. ``prelude`` is optional
-        extra op text placed *above* ``op_text`` in the function body — use
-        it when the op under test consumes a value whose type contains a
-        comma the ``func.func`` arg-list parser would split on.
+        Wraps the op in a synthetic ``func.func`` whose signature declares
+        ``args`` (external SSA operands as name → MLIR type).
 
-        Concretely, that's any ``!ktdp.tile_future<T, groups = affine_set<...>>``
-        operand: the type has one comma between the partial-tensor list
-        and the ``groups =`` clause. The arg-list parser doesn't track
-        ``<>`` depth, so declaring it as a func-arg::
+        ``prelude`` is extra op text placed above ``op_text`` in the body.
+        Use it when an operand's type contains a comma — the ``func.func``
+        arg-list parser splits arg entries on commas without tracking
+        ``<>`` depth, so any comma inside a type shreds the signature.
+        Concretely, declaring a ``!ktdp.tile_future`` operand this way::
 
-            func.func @_test(%f: !ktdp.tile_future<tensor<64xf16>,
-                                                    groups = affine_set<(g) : (g == 0)>>) ...
-                                                  ^ arg-list splits here
+            func.func @_test(%f: !ktdp.tile_future<tensor<64xf16>, groups = affine_set<(g) : (g == 0)>>) { ... }
+                                                 arg 0 ends here ^  ^ arg 1 starts here — malformed
 
-        breaks the signature into two malformed argument entries — an
-        unterminated type on one side and a bare ``groups = ...`` clause
-        on the other. Instead, define the value in the body via a
-        prelude op::
+        splits into ``%f: !ktdp.tile_future<tensor<64xf16>`` (unterminated
+        type) and ``groups = affine_set<(g) : (g == 0)>>`` (not a
+        name:type pair). Instead, define ``%f`` in-body via its producing
+        op — in-body parsing tracks ``<>`` depth and handles the type
+        correctly::
 
             self._parse(
                 "%r = ktdp.inter_tile_reduce(%f) ...",
                 prelude="%f = ktdp.inter_tile_produce ...",
             )
 
-        The old op-attribute spelling of ``groups`` did not have this
-        problem — the type used to be a single comma-free token. This
-        prelude escape hatch is what made the migration to the new form
-        possible without adding a comma-tolerant arg-list parser.
-
-        Wrapper module shape::
-
-            module {
-              func.func @_test(<func_args>) attributes { grid = [1] } {
-                <prelude>          # only if prelude is not None
-                <op_text>          # the op under test — this is what we return
-                return
-              }
-            }
-
-        The ``grid = [1]`` on the wrapper func is inert scaffolding, not part
-        of what these tests cover. ``MLIRFrontendParser._build_ir_function``
-        reads ``grid`` off the func to populate ``IRFunction.grid``, but the
-        MLIR verifier treats it as an opaque ``ArrayAttr`` — it is never
-        cross-checked against any op inside the body (e.g. the ``groups``
-        affine set on ``!ktdp.tile_future``). Bumping the value here would
-        not exercise any additional parse path, and no assertion in this
-        file inspects it. End-to-end validation of ``grid > 1`` intertile
-        behavior lives in the execution tests (see the ``ring_reduce`` and
-        ``ring_reduce_multi_group`` entries in ``tests/conftest.py``), which
-        build a ``GridExecutor`` with ``num_cores = math.prod(meta.grid)``
-        and check numerical output across cores.
-
-        Returns the parsed ``op_text`` op. It is always the *last* non-return
-        op in the body: without a prelude that's the only body op; with a
-        prelude the prelude ops come first and ``op_text`` is appended after.
-
-        See ``ParseTestMixin._parse`` for the full ``prelude`` / ``args``
-        contract shared with the regex-parser tests.
+        Returns the last non-return op — that's ``op_text`` in both the
+        no-prelude and with-prelude cases. See ``ParseTestMixin._parse``
+        for the shared contract.
         """
         # `args` declares external SSA values (name → MLIR type). Validate
         # names against both prelude and op_text — a prelude op may consume

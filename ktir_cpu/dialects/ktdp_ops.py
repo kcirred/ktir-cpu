@@ -35,7 +35,17 @@ from ..ops.comm_ops import CommPlan, RingReduceBackend
 from ..ops.grid_ops import GridOps
 from ..ops.memory_ops import MemoryOps
 from ..parser_ast import enumerate_membership_keys, parse_affine_map, parse_affine_set
-from ..parser_utils import _extract_bracket_content, _scan_angle_bracketed, extract_named_attr, find_ssa_names, parse_attr_block, parse_multi_result_lhs, parse_tensor_or_memref_type, parse_tile_future_type, split_top_level
+from ..parser_utils import (
+    _extract_bracket_content,
+    _scan_angle_bracketed,
+    extract_named_attr,
+    find_ssa_names,
+    parse_attr_block,
+    parse_multi_result_lhs,
+    parse_tensor_or_memref_type,
+    parse_tile_future_type,
+    split_top_level,
+)
 from .registry import ParseContext, register, register_parser
 
 
