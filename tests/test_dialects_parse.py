@@ -72,7 +72,7 @@ class ParseTestMixin:
         the MLIR frontend parser uses positional %argN names.
     """
 
-    def _parse(self, op_text, parse_ctx=None, args=None, prelude=None):
+    def _parse(self, op_text, parse_ctx=None, args=None):
         """Parse a single op and return the resulting Operation.
 
         ``args`` is an optional ``{name: mlir_type}`` mapping that declares
@@ -99,67 +99,12 @@ class ParseTestMixin:
 
         If ``args`` is provided, every declared name must appear in
         ``op_text``.
-
-        ``prelude`` is an optional string of MLIR op text placed before
-        ``op_text`` in the function body. Use it when the op under test
-        needs an SSA value whose *type* cannot appear in the ``func.func``
-        signature.
-
-        Why this matters in the new form. Since ``groups`` is now a
-        clause **inside** the ``!ktdp.tile_future<...>`` type parameter
-        (rather than a bare op-attribute), the operand type of
-        ``ktdp.inter_tile_reduce`` looks like::
-
-            !ktdp.tile_future<tensor<64xf16>, groups = affine_set<(g) : (g == 0)>>
-
-        The ``func.func`` argument-list parser splits argument entries on
-        any comma it sees — it does not track ``<>`` depth. So even one
-        comma inside the type is fatal. Declaring::
-
-            func.func @_test(%f: !ktdp.tile_future<tensor<64xf16>,
-                                                    groups = affine_set<(g) : (g == 0)>>) { ... }
-                                                  ^ arg-list splits here
-
-        breaks the signature into two malformed argument entries:
-        ``%f: !ktdp.tile_future<tensor<64xf16>`` (unterminated type) and
-        ``groups = affine_set<(g) : (g == 0)>>`` (not even a name:type
-        pair). Adding a multi-constraint ``affine_set<..., ...>`` would
-        introduce more commas and split the signature further, but the
-        one comma before ``groups =`` alone is enough to break it.
-
-        The bare op-attribute spelling didn't have this problem — the
-        type used to be just ``!ktdp.tile_future<tensor<64xf16>>``, a
-        single comma-free token — so the reduce test could simply
-        declare ``%f`` as a func-arg.
-
-        With the new form, the fix is to define the value *in the body*
-        instead of the signature: put an ``inter_tile_produce`` in the
-        prelude so ``%f`` is a normal in-body SSA value that the parser
-        already knows how to handle (in-body op parsing does track ``<>``
-        depth via ``split_top_level``, so commas inside the type are
-        safe there)::
-
-            self._parse(
-                "%r = ktdp.inter_tile_reduce(%f) ...",
-                prelude="%f = ktdp.inter_tile_produce ...",
-            )
-
-        The same trick applies to any future op whose result type
-        contains commas: build the value in the prelude, not the
-        signature.
-
-        With a prelude, ``_parse`` returns the *last* non-return op —
-        the op ``op_text`` describes — rather than the first.
         """
-        # Validate declared arg names against op_text plus the prelude —
-        # a prelude op can reference the same func-arg (e.g. a producing op
-        # that consumes ``%p``) without that name appearing in op_text.
-        args = self._resolve_args(f"{prelude or ''}\n{op_text}", args)
+        args = self._resolve_args(op_text, args)
         ctx = parse_ctx or _parse_ctx()
-        body = f"{prelude}\n{op_text}" if prelude else op_text
-        ops = KTIRParser()._parse_operations(body, ctx)
+        ops = KTIRParser()._parse_operations(op_text, ctx)
         assert ops, f"No op parsed from: {op_text!r}"
-        return ops[-1] if prelude else ops[0]
+        return ops[0]
 
     def _resolve_args(self, op_text, args):
         """Normalise and validate the args schema against op_text.
@@ -1187,10 +1132,12 @@ class TestKtdpParsers(ParseTestMixin):
         # unmodified. See ``test_inter_tile_produce`` for why the header
         # stays on one line.
         #
-        # ``%f`` is defined by a producing op in the prelude rather than
-        # declared as a func-arg: the ``!ktdp.tile_future<T, groups = ...>``
-        # type parameter contains commas that the MLIR arg-list parser
-        # cannot split at the ``func.func`` signature level.
+        # ``%f`` is declared as a func-arg with the parenthesized
+        # ``!ktdp.tile_future<(T), groups = ...>`` spelling — the parens
+        # around the partial-types list are what the MLIR-frontend
+        # dialect parser expects, and upstream MLIR's arg-list parser
+        # tracks ``<>`` depth so the internal comma before ``groups =``
+        # does not shred the signature.
         op = self._parse(
             "%r = ktdp.inter_tile_reduce(%f)"
             " consumer_tiles_per_group ="
@@ -1206,18 +1153,11 @@ class TestKtdpParsers(ParseTestMixin):
             " -> tensor<64xf16>\n"
             "        ktdp.yield_reduced %s : tensor<64xf16>\n"
             "    }",
-            args={"%id": "tensor<64xf16>", "%p": "tensor<64xf16>"},
-            prelude=(
-                "%f = ktdp.inter_tile_produce"
-                " producer_tiles_per_group ="
-                " affine_set<(i)[g] : (i - g == 0, i >= 0, -i + 3 >= 0)>"
-                " -> <(tensor<64xf16>),"
-                " groups = affine_set<(g) : (g == 0)>>\n"
-                "    {\n"
-                "      ^bb0(%gid: index):\n"
-                "        ktdp.yield_partial %p : tensor<64xf16>\n"
-                "    }"
-            ),
+            args={
+                "%id": "tensor<64xf16>",
+                "%f":  "!ktdp.tile_future<(tensor<64xf16>),"
+                       " groups = affine_set<(g) : (g == 0)>>",
+            },
         )
         self.assert_op_type(op, "ktdp.inter_tile_reduce")
         self.assert_attribute(

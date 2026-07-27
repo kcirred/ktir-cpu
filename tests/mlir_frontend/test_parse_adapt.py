@@ -43,46 +43,19 @@ class MLIRFrontendParseTestMixin:
         else:
             super().assert_attribute(op, key, value, transform=transform)
 
-    def _parse(self, op_text, parse_ctx=None, args=None, prelude=None):
+    def _parse(self, op_text, parse_ctx=None, args=None):
         """Parse ``op_text`` through the MLIR frontend and return the op under test.
 
         Wraps the op in a synthetic ``func.func`` whose signature declares
-        ``args`` (external SSA operands as name → MLIR type).
-
-        ``prelude`` is extra op text placed above ``op_text`` in the body.
-        Use it when an operand's type contains a comma — the ``func.func``
-        arg-list parser splits arg entries on commas without tracking
-        ``<>`` depth, so any comma inside a type shreds the signature.
-        Concretely, declaring a ``!ktdp.tile_future`` operand this way::
-
-            func.func @_test(%f: !ktdp.tile_future<tensor<64xf16>, groups = affine_set<(g) : (g == 0)>>) { ... }
-                                                 arg 0 ends here ^  ^ arg 1 starts here — malformed
-
-        splits into ``%f: !ktdp.tile_future<tensor<64xf16>`` (unterminated
-        type) and ``groups = affine_set<(g) : (g == 0)>>`` (not a
-        name:type pair). Instead, define ``%f`` in-body via its producing
-        op — in-body parsing tracks ``<>`` depth and handles the type
-        correctly::
-
-            self._parse(
-                "%r = ktdp.inter_tile_reduce(%f) ...",
-                prelude="%f = ktdp.inter_tile_produce ...",
-            )
-
-        Returns the last non-return op — that's ``op_text`` in both the
-        no-prelude and with-prelude cases. See ``ParseTestMixin._parse``
-        for the shared contract.
+        ``args`` (external SSA operands as name → MLIR type). See
+        ``ParseTestMixin._parse`` for the shared ``args`` contract.
         """
-        # `args` declares external SSA values (name → MLIR type). Validate
-        # names against both prelude and op_text — a prelude op may consume
-        # a declared value that never appears in op_text itself.
-        args = self._resolve_args(f"{prelude or ''}\n{op_text}", args)
+        args = self._resolve_args(op_text, args)
         func_args = ", ".join(f"{name}: {mlir_type}" for name, mlir_type in args.items())
-        body = f"{prelude}\n    {op_text}" if prelude else op_text
         module_text = f"""\
 module {{
   func.func @_test({func_args}) attributes {{ grid = [1] }} {{
-    {body}
+    {op_text}
     return
   }}
 }}
@@ -92,6 +65,7 @@ module {{
         for op in ir_module.get_function("_test").operations:
             if op.op_type not in ("func.return", "return"):
                 op_under_test = op
+                break
         if op_under_test is None:
             raise RuntimeError(f"No op parsed from:\n{module_text}")
         return op_under_test
